@@ -23,7 +23,6 @@ if _raw_owner.isdigit():
 
 
 def is_owner(update: Update) -> bool:
-    """True только если отправитель — владелец бота (OWNER_ID из env)."""
     if OWNER_ID is None:
         return False
     return update.message.from_user.id == OWNER_ID
@@ -53,41 +52,33 @@ def is_private(update: Update) -> bool:
 
 
 async def check_private_access(update: Update) -> bool:
-    """
-    В личных чатах — только пользователи из whitelist.
-    Возвращает True если доступ разрешён, иначе False (и отправляет отказ).
-    """
     if not is_private(update):
         return True
     user_id = update.message.from_user.id
+    if OWNER_ID and user_id == OWNER_ID:
+        return True
     if db.whitelist_check(user_id):
         return True
     await update.message.reply_text(
-        "🔒 Доступ в ЛС ограничен. Обратитесь к владельцу бота, чтобы вас добавили в whitelist."
+        "🔒 Доступ в ЛС ограничен. Обратитесь к владельцу бота."
     )
     return False
 
 
 async def whitelist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /whitelist add @username   — добавить пользователя
-    /whitelist remove @username — убрать пользователя
-    /whitelist list            — посмотреть список
-    Только для владельца бота (OWNER_ID).
-    """
     message = update.message
     if not message:
         return
 
     if not is_owner(update):
-        await message.reply_text("🔒 Управлять whitelist может только владелец бота.")
+        await message.reply_text("🔒 Только владелец бота может управлять whitelist.")
         return
 
     if not context.args:
         await message.reply_text(
-            "📋 <b>Управление whitelist (ЛС)</b>\n\n"
-            "/whitelist add @username — добавить\n"
-            "/whitelist remove @username — убрать\n"
+            "📋 <b>Whitelist</b>\n\n"
+            "/whitelist add 123456789 — добавить по Telegram ID\n"
+            "/whitelist remove 123456789 — убрать по Telegram ID\n"
             "/whitelist list — список",
             parse_mode="HTML",
         )
@@ -95,77 +86,57 @@ async def whitelist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sub = context.args[0].lower()
 
-    # --- LIST ---
     if sub == "list":
         users = db.whitelist_get_all()
         if not users:
             await message.reply_text("📋 Whitelist пуст.")
             return
-        lines = ["📋 <b>Whitelist (доступ в ЛС):</b>\n"]
+        lines = ["📋 <b>Whitelist:</b>\n"]
         for u in users:
             uname = f"@{u['username']}" if u["username"] else f"id{u['user_id']}"
-            lines.append(f"• {uname}")
+            lines.append(f"• {uname} ({u['user_id']})")
         await message.reply_text("\n".join(lines), parse_mode="HTML")
         return
 
-    # --- ADD / REMOVE ---
     if sub not in ("add", "remove"):
-        await message.reply_text("❌ Неизвестная подкоманда. Используй: add, remove, list")
+        await message.reply_text("❌ Используй: add, remove, list")
         return
 
-    target_username = None
-    target_user_id = None
-
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == "mention":
-                target_username = message.text[entity.offset + 1: entity.offset + entity.length]
-                break
-            elif entity.type == "text_mention" and entity.user:
-                target_user_id = entity.user.id
-                target_username = entity.user.username
-                break
-
-    if target_username is None and target_user_id is None and len(context.args) >= 2:
-        raw = context.args[1].lstrip("@")
-        if raw:
-            target_username = raw
-
-    if target_username is None and target_user_id is None:
-        await message.reply_text(f"❌ Укажи пользователя: /whitelist {sub} @username")
+    if len(context.args) < 2:
+        await message.reply_text(f"❌ Укажи Telegram ID: /whitelist {sub} 123456789")
         return
+
+    raw = context.args[1].lstrip("@")
+
+    if raw.lstrip("-").isdigit():
+        target_id = int(raw)
+        target_username = None
+        known = db.get_user_by_id(target_id)
+        if known:
+            target_username = known.get("username")
+    else:
+        known = db.get_or_create_user_by_username(raw)
+        if not known:
+            await message.reply_text("❌ Пользователь не найден. Передай Telegram ID числом.")
+            return
+        target_id = known["user_id"]
+        target_username = known.get("username")
+
+    mention = f"@{target_username}" if target_username else f"id{target_id}"
 
     if sub == "add":
-        if target_user_id is None and target_username:
-            known = db.get_or_create_user_by_username(target_username)
-            target_user_id = known["user_id"] if known else None
-
-        if target_user_id is None:
-            await message.reply_text(
-                f"❌ Не удалось найти пользователя @{target_username}. "
-                "Убедитесь, что он хоть раз писал в чате."
-            )
-            return
-
-        newly_added = db.whitelist_add(target_user_id, target_username)
-        mention = f"@{target_username}" if target_username else f"id{target_user_id}"
-        if newly_added:
-            await message.reply_text(f"✅ {mention} добавлен в whitelist. Теперь может пользоваться ботом в ЛС.")
+        newly = db.whitelist_add(target_id, target_username)
+        if newly:
+            await message.reply_text(f"✅ {mention} ({target_id}) добавлен в whitelist.")
         else:
-            await message.reply_text(f"ℹ️ {mention} уже был в whitelist.")
+            await message.reply_text(f"ℹ️ {mention} ({target_id}) уже в whitelist.")
 
     elif sub == "remove":
-        removed = False
-        if target_user_id is not None:
-            removed = db.whitelist_remove(target_user_id)
-        elif target_username:
-            removed = db.whitelist_remove_by_username(target_username)
-
-        mention = f"@{target_username}" if target_username else f"id{target_user_id}"
+        removed = db.whitelist_remove(target_id)
         if removed:
-            await message.reply_text(f"✅ {mention} удалён из whitelist.")
+            await message.reply_text(f"✅ {mention} ({target_id}) удалён из whitelist.")
         else:
-            await message.reply_text(f"ℹ️ {mention} не найден в whitelist.")
+            await message.reply_text(f"ℹ️ {mention} ({target_id}) не найден в whitelist.")
 
 
 async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
