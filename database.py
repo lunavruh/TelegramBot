@@ -45,6 +45,35 @@ class Database:
                     username    TEXT,
                     added_at    TEXT DEFAULT (datetime('now'))
                 );
+
+                CREATE TABLE IF NOT EXISTS contests (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id     INTEGER NOT NULL,
+                    title       TEXT NOT NULL,
+                    start_at    TEXT NOT NULL,
+                    end_at      TEXT NOT NULL,
+                    status      TEXT NOT NULL DEFAULT 'pending',
+                    created_by  INTEGER NOT NULL,
+                    created_at  TEXT DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS contest_prizes (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contest_id  INTEGER NOT NULL,
+                    place       INTEGER NOT NULL,
+                    prize       TEXT NOT NULL,
+                    FOREIGN KEY (contest_id) REFERENCES contests(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS contest_results (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contest_id  INTEGER NOT NULL,
+                    user_id     INTEGER NOT NULL,
+                    place       INTEGER NOT NULL,
+                    lok_count   INTEGER NOT NULL,
+                    prize       TEXT,
+                    FOREIGN KEY (contest_id) REFERENCES contests(id)
+                );
             """)
             try:
                 conn.execute("ALTER TABLE loks ADD COLUMN reason TEXT")
@@ -54,6 +83,8 @@ class Database:
                 conn.execute("ALTER TABLE loks ADD COLUMN type TEXT NOT NULL DEFAULT 'plus'")
             except Exception:
                 pass
+
+    # --- Users ---
 
     def ensure_user(self, user_id: int, username: Optional[str], first_name: Optional[str], last_name: Optional[str]):
         with self._conn() as conn:
@@ -110,6 +141,8 @@ class Database:
                 "SELECT * FROM users WHERE user_id = ?", (user_id,)
             ).fetchone()
             return dict(row) if row else None
+
+    # --- Loks ---
 
     def add_lok(self, receiver_id: int, giver_id: int, chat_id: int, reason: Optional[str] = None):
         with self._conn() as conn:
@@ -265,5 +298,137 @@ class Database:
             row = conn.execute(
                 "SELECT user_id, username FROM whitelist WHERE username = ? COLLATE NOCASE",
                 (username,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    # --- Contests ---
+
+    def contest_create(self, chat_id: int, title: str, start_at: str, end_at: str, created_by: int) -> int:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO contests (chat_id, title, start_at, end_at, created_by, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+                (chat_id, title, start_at, end_at, created_by),
+            )
+            return cur.lastrowid
+
+    def contest_add_prize(self, contest_id: int, place: int, prize: str):
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO contest_prizes (contest_id, place, prize) VALUES (?, ?, ?)",
+                (contest_id, place, prize),
+            )
+
+    def contest_get_prizes(self, contest_id: int) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT place, prize FROM contest_prizes WHERE contest_id = ? ORDER BY place",
+                (contest_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def contest_get_active(self, chat_id: int) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM contests
+                WHERE chat_id = ? AND status = 'active'
+                ORDER BY start_at DESC LIMIT 1
+                """,
+                (chat_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def contest_get_pending(self, chat_id: int) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM contests
+                WHERE chat_id = ? AND status = 'pending'
+                ORDER BY start_at ASC LIMIT 1
+                """,
+                (chat_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def contest_get_by_id(self, contest_id: int) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM contests WHERE id = ?", (contest_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def contest_set_status(self, contest_id: int, status: str):
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE contests SET status = ? WHERE id = ?",
+                (status, contest_id),
+            )
+
+    def contest_get_all_pending_and_active(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM contests WHERE status IN ('pending', 'active')"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def contest_get_top(self, contest_id: int, limit: int = 10) -> list[dict]:
+        with self._conn() as conn:
+            contest = conn.execute(
+                "SELECT start_at, end_at FROM contests WHERE id = ?", (contest_id,)
+            ).fetchone()
+            if not contest:
+                return []
+
+            rows = conn.execute(
+                """
+                SELECT
+                    u.user_id,
+                    u.username,
+                    u.first_name,
+                    u.last_name,
+                    SUM(CASE WHEN l.type = 'plus' THEN 1 ELSE -1 END) AS lok_count
+                FROM loks l
+                JOIN users u ON u.user_id = l.receiver_id
+                WHERE l.given_at >= ? AND l.given_at <= ?
+                GROUP BY l.receiver_id
+                HAVING lok_count > 0
+                ORDER BY lok_count DESC
+                LIMIT ?
+                """,
+                (contest["start_at"], contest["end_at"], limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def contest_save_results(self, contest_id: int, results: list[dict]):
+        with self._conn() as conn:
+            for r in results:
+                conn.execute(
+                    "INSERT INTO contest_results (contest_id, user_id, place, lok_count, prize) VALUES (?, ?, ?, ?, ?)",
+                    (contest_id, r["user_id"], r["place"], r["lok_count"], r.get("prize")),
+                )
+
+    def contest_get_results(self, contest_id: int) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT cr.place, cr.lok_count, cr.prize, u.username, u.first_name, u.user_id
+                FROM contest_results cr
+                JOIN users u ON u.user_id = cr.user_id
+                WHERE cr.contest_id = ?
+                ORDER BY cr.place
+                """,
+                (contest_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def contest_get_last_finished(self, chat_id: int) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM contests
+                WHERE chat_id = ? AND status = 'finished'
+                ORDER BY end_at DESC LIMIT 1
+                """,
+                (chat_id,),
             ).fetchone()
             return dict(row) if row else None
