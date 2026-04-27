@@ -105,9 +105,9 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     if reason:
-        text = f"{mention_text} 🔒 {reason}\n💎 Локов: {total}"
+        text = f"{mention_text} lock {reason}🔒"
     else:
-        text = f"{mention_text} получает лок!\n💎 Локов: {total}"
+        text = f"{mention_text} получает лок!"
 
     await context.bot.send_message(
         chat_id=message.chat_id,
@@ -184,9 +184,9 @@ async def minus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     if reason:
-        text = f"{mention_text} 🔓 -{reason}\n💎 Локов: {total}"
+        text = f"{mention_text} теряет лок по причине: {reason}🔓"
     else:
-        text = f"{mention_text} теряет лок!\n💎 Локов: {total}"
+        text = f"{mention_text} теряет лок!"
 
     await context.bot.send_message(
         chat_id=message.chat_id,
