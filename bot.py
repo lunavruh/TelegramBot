@@ -1,6 +1,5 @@
 import logging
 import os
-from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -30,6 +29,13 @@ def get_lok_word(count: int) -> str:
         return "локов"
 
 
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat_id
+    member = await context.bot.get_chat_member(chat_id, user_id)
+    return member.status in ("administrator", "creator")
+
+
 async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -37,6 +43,10 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if message.chat.type == "private":
         await message.reply_text("❌ Эта команда работает только в группах!")
+        return
+
+    if not await is_admin(update, context):
+        await message.reply_text("❌ Только администраторы могут давать локи!")
         return
 
     target_user = None
@@ -155,7 +165,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🤖 <b>Бот-менеджер локов</b>\n\n"
         "📌 <b>Команды:</b>\n"
-        "/pluslok @username — дать 1 лок пользователю\n"
+        "/pluslok @username — дать 1 лок (только админы)\n"
         "/top — топ по локам за всё время\n"
         "/top 30 — топ за 30 дней\n"
         "/top 1 — топ за сегодня\n"
