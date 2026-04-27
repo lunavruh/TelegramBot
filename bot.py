@@ -16,6 +16,18 @@ logger = logging.getLogger(__name__)
 
 db = Database("loks.db")
 
+OWNER_ID: int | None = None
+_raw_owner = os.environ.get("OWNER_ID", "").strip()
+if _raw_owner.isdigit():
+    OWNER_ID = int(_raw_owner)
+
+
+def is_owner(update: Update) -> bool:
+    """True только если отправитель — владелец бота (OWNER_ID из env)."""
+    if OWNER_ID is None:
+        return False
+    return update.message.from_user.id == OWNER_ID
+
 
 def get_lok_word(count: int) -> str:
     if 11 <= count % 100 <= 14:
@@ -36,9 +48,132 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return member.status in ("administrator", "creator")
 
 
+def is_private(update: Update) -> bool:
+    return update.message.chat.type == "private"
+
+
+async def check_private_access(update: Update) -> bool:
+    """
+    В личных чатах — только пользователи из whitelist.
+    Возвращает True если доступ разрешён, иначе False (и отправляет отказ).
+    """
+    if not is_private(update):
+        return True
+    user_id = update.message.from_user.id
+    if db.whitelist_check(user_id):
+        return True
+    await update.message.reply_text(
+        "🔒 Доступ в ЛС ограничен. Обратитесь к владельцу бота, чтобы вас добавили в whitelist."
+    )
+    return False
+
+
+async def whitelist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /whitelist add @username   — добавить пользователя
+    /whitelist remove @username — убрать пользователя
+    /whitelist list            — посмотреть список
+    Только для владельца бота (OWNER_ID).
+    """
+    message = update.message
+    if not message:
+        return
+
+    if not is_owner(update):
+        await message.reply_text("🔒 Управлять whitelist может только владелец бота.")
+        return
+
+    if not context.args:
+        await message.reply_text(
+            "📋 <b>Управление whitelist (ЛС)</b>\n\n"
+            "/whitelist add @username — добавить\n"
+            "/whitelist remove @username — убрать\n"
+            "/whitelist list — список",
+            parse_mode="HTML",
+        )
+        return
+
+    sub = context.args[0].lower()
+
+    # --- LIST ---
+    if sub == "list":
+        users = db.whitelist_get_all()
+        if not users:
+            await message.reply_text("📋 Whitelist пуст.")
+            return
+        lines = ["📋 <b>Whitelist (доступ в ЛС):</b>\n"]
+        for u in users:
+            uname = f"@{u['username']}" if u["username"] else f"id{u['user_id']}"
+            lines.append(f"• {uname}")
+        await message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    # --- ADD / REMOVE ---
+    if sub not in ("add", "remove"):
+        await message.reply_text("❌ Неизвестная подкоманда. Используй: add, remove, list")
+        return
+
+    target_username = None
+    target_user_id = None
+
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "mention":
+                target_username = message.text[entity.offset + 1: entity.offset + entity.length]
+                break
+            elif entity.type == "text_mention" and entity.user:
+                target_user_id = entity.user.id
+                target_username = entity.user.username
+                break
+
+    if target_username is None and target_user_id is None and len(context.args) >= 2:
+        raw = context.args[1].lstrip("@")
+        if raw:
+            target_username = raw
+
+    if target_username is None and target_user_id is None:
+        await message.reply_text(f"❌ Укажи пользователя: /whitelist {sub} @username")
+        return
+
+    if sub == "add":
+        if target_user_id is None and target_username:
+            known = db.get_or_create_user_by_username(target_username)
+            target_user_id = known["user_id"] if known else None
+
+        if target_user_id is None:
+            await message.reply_text(
+                f"❌ Не удалось найти пользователя @{target_username}. "
+                "Убедитесь, что он хоть раз писал в чате."
+            )
+            return
+
+        newly_added = db.whitelist_add(target_user_id, target_username)
+        mention = f"@{target_username}" if target_username else f"id{target_user_id}"
+        if newly_added:
+            await message.reply_text(f"✅ {mention} добавлен в whitelist. Теперь может пользоваться ботом в ЛС.")
+        else:
+            await message.reply_text(f"ℹ️ {mention} уже был в whitelist.")
+
+    elif sub == "remove":
+        removed = False
+        if target_user_id is not None:
+            removed = db.whitelist_remove(target_user_id)
+        elif target_username:
+            removed = db.whitelist_remove_by_username(target_username)
+
+        mention = f"@{target_username}" if target_username else f"id{target_user_id}"
+        if removed:
+            await message.reply_text(f"✅ {mention} удалён из whitelist.")
+        else:
+            await message.reply_text(f"ℹ️ {mention} не найден в whitelist.")
+
+
 async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
+        return
+
+    if not await check_private_access(update):
         return
 
     if message.chat.type == "private":
@@ -96,8 +231,6 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=message.chat_id,
         reason=reason,
     )
-
-    total = db.get_total_loks(target_user["user_id"])
 
     try:
         await message.delete()
@@ -176,7 +309,6 @@ async def minus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     db.remove_lok(receiver_id=target_user["user_id"], reason=reason)
-    total = db.get_total_loks(target_user["user_id"])
 
     try:
         await message.delete()
@@ -198,6 +330,9 @@ async def minus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
+        return
+
+    if not await check_private_access(update):
         return
 
     target_user = None
@@ -259,6 +394,9 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message:
         return
 
+    if not await check_private_access(update):
+        return
+
     days = None
     if context.args:
         try:
@@ -307,6 +445,9 @@ async def my_loks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message:
         return
 
+    if not await check_private_access(update):
+        return
+
     user = message.from_user
     db.ensure_user(user.id, user.username, user.first_name, user.last_name)
     total = db.get_total_loks(user.id)
@@ -318,6 +459,9 @@ async def my_loks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_private_access(update):
+        return
+
     text = (
         "🤖 <b>Бот-менеджер локов</b>\n\n"
         "📌 <b>Команды:</b>\n"
@@ -328,6 +472,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/top 30 — топ за 30 дней\n"
         "/mylok — сколько локов у тебя\n"
         "/help — это сообщение\n\n"
+        "🔒 <b>Доступ в ЛС:</b> только для пользователей из whitelist.\n"
+        "/whitelist add/remove/list — управление (только владелец бота)\n\n"
         "💎 <i>Лок — это знак уважения в чате!</i>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
@@ -338,6 +484,14 @@ def main():
     if not token:
         raise ValueError("Укажи BOT_TOKEN в переменных окружения или в .env файле")
 
+    if OWNER_ID is None:
+        logger.warning(
+            "OWNER_ID не задан! Команда /whitelist будет недоступна. "
+            "Добавь OWNER_ID=<твой_telegram_id> в переменные окружения."
+        )
+    else:
+        logger.info(f"Владелец бота: {OWNER_ID}")
+
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler(["pluslok", "lok"], plus_lok))
@@ -345,6 +499,7 @@ def main():
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler(["mylok", "myloks"], my_loks))
+    app.add_handler(CommandHandler("whitelist", whitelist_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", help_cmd))
 
