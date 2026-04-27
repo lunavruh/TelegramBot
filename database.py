@@ -39,6 +39,12 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_loks_receiver ON loks(receiver_id);
                 CREATE INDEX IF NOT EXISTS idx_loks_given_at ON loks(given_at);
                 CREATE INDEX IF NOT EXISTS idx_loks_chat     ON loks(chat_id);
+
+                CREATE TABLE IF NOT EXISTS whitelist (
+                    user_id     INTEGER PRIMARY KEY,
+                    username    TEXT,
+                    added_at    TEXT DEFAULT (datetime('now'))
+                );
             """)
             try:
                 conn.execute("ALTER TABLE loks ADD COLUMN reason TEXT")
@@ -201,3 +207,56 @@ class Database:
                 params,
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # --- Whitelist ---
+
+    def whitelist_add(self, user_id: int, username: Optional[str]) -> bool:
+        with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM whitelist WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE whitelist SET username = ? WHERE user_id = ?",
+                    (username, user_id),
+                )
+                return False
+            conn.execute(
+                "INSERT INTO whitelist (user_id, username) VALUES (?, ?)",
+                (user_id, username),
+            )
+            return True
+
+    def whitelist_remove(self, user_id: int) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM whitelist WHERE user_id = ?", (user_id,))
+            return cur.rowcount > 0
+
+    def whitelist_remove_by_username(self, username: str) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM whitelist WHERE username = ? COLLATE NOCASE", (username,)
+            )
+            return cur.rowcount > 0
+
+    def whitelist_check(self, user_id: int) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM whitelist WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return row is not None
+
+    def whitelist_get_all(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT user_id, username, added_at FROM whitelist ORDER BY added_at"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def whitelist_get_by_username(self, username: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT user_id, username FROM whitelist WHERE username = ? COLLATE NOCASE",
+                (username,),
+            ).fetchone()
+            return dict(row) if row else None
