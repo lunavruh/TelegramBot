@@ -34,9 +34,9 @@ class Database:
                     given_at    TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_loks_receiver   ON loks(receiver_id);
-                CREATE INDEX IF NOT EXISTS idx_loks_given_at   ON loks(given_at);
-                CREATE INDEX IF NOT EXISTS idx_loks_chat       ON loks(chat_id);
+                CREATE INDEX IF NOT EXISTS idx_loks_receiver ON loks(receiver_id);
+                CREATE INDEX IF NOT EXISTS idx_loks_given_at ON loks(given_at);
+                CREATE INDEX IF NOT EXISTS idx_loks_chat     ON loks(chat_id);
             """)
 
     def ensure_user(self, user_id: int, username: Optional[str], first_name: Optional[str], last_name: Optional[str]):
@@ -93,6 +93,18 @@ class Database:
             conn.execute(
                 "INSERT INTO loks (receiver_id, giver_id, chat_id) VALUES (?, ?, ?)",
                 (receiver_id, giver_id, chat_id),
+            )
+
+    def remove_lok(self, receiver_id: int):
+        with self._conn() as conn:
+            conn.execute(
+                """
+                DELETE FROM loks WHERE id = (
+                    SELECT id FROM loks WHERE receiver_id = ?
+                    ORDER BY given_at DESC LIMIT 1
+                )
+                """,
+                (receiver_id,),
             )
 
     def get_total_loks(self, user_id: int) -> int:
