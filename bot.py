@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -21,6 +22,11 @@ _raw_owner = os.environ.get("OWNER_ID", "").strip()
 if _raw_owner.isdigit():
     OWNER_ID = int(_raw_owner)
 
+# Состояние создания конкурса: {user_id: {step, data}}
+contest_creation: dict = {}
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def is_owner(update: Update) -> bool:
     if OWNER_ID is None:
@@ -28,16 +34,8 @@ def is_owner(update: Update) -> bool:
     return update.message.from_user.id == OWNER_ID
 
 
-def get_lok_word(count: int) -> str:
-    if 11 <= count % 100 <= 14:
-        return "локов"
-    last = count % 10
-    if last == 1:
-        return "лок"
-    elif 2 <= last <= 4:
-        return "лока"
-    else:
-        return "локов"
+def is_private(update: Update) -> bool:
+    return update.message.chat.type == "private"
 
 
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -45,10 +43,6 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat_id = update.message.chat_id
     member = await context.bot.get_chat_member(chat_id, user_id)
     return member.status in ("administrator", "creator")
-
-
-def is_private(update: Update) -> bool:
-    return update.message.chat.type == "private"
 
 
 async def check_private_access(update: Update) -> bool:
@@ -65,79 +59,47 @@ async def check_private_access(update: Update) -> bool:
     return False
 
 
-async def whitelist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message:
-        return
-
-    if not is_owner(update):
-        await message.reply_text("🔒 Только владелец бота может управлять whitelist.")
-        return
-
-    if not context.args:
-        await message.reply_text(
-            "📋 <b>Whitelist</b>\n\n"
-            "/whitelist add 123456789 — добавить по Telegram ID\n"
-            "/whitelist remove 123456789 — убрать по Telegram ID\n"
-            "/whitelist list — список",
-            parse_mode="HTML",
-        )
-        return
-
-    sub = context.args[0].lower()
-
-    if sub == "list":
-        users = db.whitelist_get_all()
-        if not users:
-            await message.reply_text("📋 Whitelist пуст.")
-            return
-        lines = ["📋 <b>Whitelist:</b>\n"]
-        for u in users:
-            uname = f"@{u['username']}" if u["username"] else f"id{u['user_id']}"
-            lines.append(f"• {uname} ({u['user_id']})")
-        await message.reply_text("\n".join(lines), parse_mode="HTML")
-        return
-
-    if sub not in ("add", "remove"):
-        await message.reply_text("❌ Используй: add, remove, list")
-        return
-
-    if len(context.args) < 2:
-        await message.reply_text(f"❌ Укажи Telegram ID: /whitelist {sub} 123456789")
-        return
-
-    raw = context.args[1].lstrip("@")
-
-    if raw.lstrip("-").isdigit():
-        target_id = int(raw)
-        target_username = None
-        known = db.get_user_by_id(target_id)
-        if known:
-            target_username = known.get("username")
+def get_lok_word(count: int) -> str:
+    if 11 <= count % 100 <= 14:
+        return "локов"
+    last = count % 10
+    if last == 1:
+        return "лок"
+    elif 2 <= last <= 4:
+        return "лока"
     else:
-        known = db.get_or_create_user_by_username(raw)
-        if not known:
-            await message.reply_text("❌ Пользователь не найден. Передай Telegram ID числом.")
-            return
-        target_id = known["user_id"]
-        target_username = known.get("username")
+        return "локов"
 
-    mention = f"@{target_username}" if target_username else f"id{target_id}"
 
-    if sub == "add":
-        newly = db.whitelist_add(target_id, target_username)
-        if newly:
-            await message.reply_text(f"✅ {mention} ({target_id}) добавлен в whitelist.")
-        else:
-            await message.reply_text(f"ℹ️ {mention} ({target_id}) уже в whitelist.")
+def _day_word(days: int) -> str:
+    if 11 <= days % 100 <= 14:
+        return "дней"
+    last = days % 10
+    if last == 1:
+        return "день"
+    elif 2 <= last <= 4:
+        return "дня"
+    else:
+        return "дней"
 
-    elif sub == "remove":
-        removed = db.whitelist_remove(target_id)
-        if removed:
-            await message.reply_text(f"✅ {mention} ({target_id}) удалён из whitelist.")
-        else:
-            await message.reply_text(f"ℹ️ {mention} ({target_id}) не найден в whitelist.")
 
+def parse_date(s: str) -> datetime | None:
+    for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            dt = datetime.strptime(s.strip(), fmt)
+            if fmt == "%d.%m.%Y":
+                dt = dt.replace(hour=0, minute=0, second=0)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def medals(i: int) -> str:
+    return ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i + 1}."
+
+
+# ─── Loks ─────────────────────────────────────────────────────────────────────
 
 async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -208,15 +170,11 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    if reason:
-        text = f"{mention_text} lock {reason}🔒"
-    else:
-        text = f"{mention_text} получает лок!"
-
+    text = f"{mention_text} lock {reason}🔒" if reason else f"{mention_text} получает лок!"
     await context.bot.send_message(
         chat_id=message.chat_id,
         message_thread_id=message.message_thread_id,
-        text=text
+        text=text,
     )
 
 
@@ -286,15 +244,11 @@ async def minus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    if reason:
-        text = f"{mention_text} теряет лок по причине: {reason}🔓"
-    else:
-        text = f"{mention_text} теряет лок!"
-
+    text = f"{mention_text} теряет лок по причине: {reason}🔓" if reason else f"{mention_text} теряет лок!"
     await context.bot.send_message(
         chat_id=message.chat_id,
         message_thread_id=message.message_thread_id,
-        text=text
+        text=text,
     )
 
 
@@ -347,12 +301,10 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"📋 <b>История локов — {mention_text}:</b>\n"]
     for r in records:
         date = r["given_at"][:10]
-        if r["type"] == "plus":
-            reason_str = f" — {r['reason']}" if r.get("reason") else ""
-            lines.append(f"🔒 +1{reason_str} <i>({date})</i>")
-        else:
-            reason_str = f" — {r['reason']}" if r.get("reason") else ""
-            lines.append(f"🔓 -1{reason_str} <i>({date})</i>")
+        reason_str = f" — {r['reason']}" if r.get("reason") else ""
+        icon = "🔒" if r["type"] == "plus" else "🔓"
+        sign = "+1" if r["type"] == "plus" else "-1"
+        lines.append(f"{icon} {sign}{reason_str} <i>({date})</i>")
 
     total = db.get_total_loks(target_user["user_id"])
     lines.append(f"\n💎 Итого: <b>{total}</b> {get_lok_word(total)}")
@@ -388,27 +340,14 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     period_str = f"за {days} {_day_word(days)}" if days else "за всё время"
     lines = [f"🏆 <b>Топ по локам {period_str}:</b>\n"]
 
-    medals = ["🥇", "🥈", "🥉"]
     for i, row in enumerate(top_users):
-        medal = medals[i] if i < 3 else f"{i + 1}."
+        medal = medals(i)
         name = row["first_name"] or row["username"] or f"id{row['user_id']}"
         username_str = f" (@{row['username']})" if row["username"] else ""
         count = row["lok_count"]
         lines.append(f"{medal} {name}{username_str} — <b>{count}</b> {get_lok_word(count)}")
 
     await message.reply_text("\n".join(lines), parse_mode="HTML")
-
-
-def _day_word(days: int) -> str:
-    if 11 <= days % 100 <= 14:
-        return "дней"
-    last = days % 10
-    if last == 1:
-        return "день"
-    elif 2 <= last <= 4:
-        return "дня"
-    else:
-        return "дней"
 
 
 async def my_loks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -424,59 +363,242 @@ async def my_loks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = db.get_total_loks(user.id)
     name = user.first_name or user.username or "Ты"
 
-    await message.reply_text(
-        f"💎 {name}, у тебя {total} {get_lok_word(total)}!"
-    )
+    await message.reply_text(f"💎 {name}, у тебя {total} {get_lok_word(total)}!")
 
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_private_access(update):
+# ─── Whitelist ────────────────────────────────────────────────────────────────
+
+async def whitelist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
         return
 
-    text = (
-        "🤖 <b>Бот-менеджер локов</b>\n\n"
-        "📌 <b>Команды:</b>\n"
-        "/pluslok @username [предмет] — дать лок (только админы)\n"
-        "/minuslok @username [причина] — забрать лок (только админы)\n"
-        "/history @username — история локов пользователя\n"
-        "/top — топ по локам за всё время\n"
-        "/top 30 — топ за 30 дней\n"
-        "/mylok — сколько локов у тебя\n"
-        "/help — это сообщение\n\n"
-        "🔒 <b>Доступ в ЛС:</b> только для пользователей из whitelist.\n"
-        "/whitelist add/remove/list — управление (только владелец бота)\n\n"
-        "💎 <i>Лок — это знак уважения в чате!</i>"
-    )
-    await update.message.reply_text(text, parse_mode="HTML")
+    if not is_owner(update):
+        await message.reply_text("🔒 Только владелец бота может управлять whitelist.")
+        return
 
-
-def main():
-    token = os.environ.get("BOT_TOKEN")
-    if not token:
-        raise ValueError("Укажи BOT_TOKEN в переменных окружения или в .env файле")
-
-    if OWNER_ID is None:
-        logger.warning(
-            "OWNER_ID не задан! Команда /whitelist будет недоступна. "
-            "Добавь OWNER_ID=<твой_telegram_id> в переменные окружения."
+    if not context.args:
+        await message.reply_text(
+            "📋 <b>Whitelist</b>\n\n"
+            "/whitelist add 123456789 — добавить по Telegram ID\n"
+            "/whitelist remove 123456789 — убрать по Telegram ID\n"
+            "/whitelist list — список",
+            parse_mode="HTML",
         )
+        return
+
+    sub = context.args[0].lower()
+
+    if sub == "list":
+        users = db.whitelist_get_all()
+        if not users:
+            await message.reply_text("📋 Whitelist пуст.")
+            return
+        lines = ["📋 <b>Whitelist:</b>\n"]
+        for u in users:
+            uname = f"@{u['username']}" if u["username"] else f"id{u['user_id']}"
+            lines.append(f"• {uname} ({u['user_id']})")
+        await message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    if sub not in ("add", "remove"):
+        await message.reply_text("❌ Используй: add, remove, list")
+        return
+
+    if len(context.args) < 2:
+        await message.reply_text(f"❌ Укажи Telegram ID: /whitelist {sub} 123456789")
+        return
+
+    raw = context.args[1].lstrip("@")
+
+    if raw.lstrip("-").isdigit():
+        target_id = int(raw)
+        target_username = None
+        known = db.get_user_by_id(target_id)
+        if known:
+            target_username = known.get("username")
     else:
-        logger.info(f"Владелец бота: {OWNER_ID}")
+        known = db.get_or_create_user_by_username(raw)
+        if not known:
+            await message.reply_text("❌ Пользователь не найден. Передай Telegram ID числом.")
+            return
+        target_id = known["user_id"]
+        target_username = known.get("username")
 
-    app = Application.builder().token(token).build()
+    mention = f"@{target_username}" if target_username else f"id{target_id}"
 
-    app.add_handler(CommandHandler(["pluslok", "lok"], plus_lok))
-    app.add_handler(CommandHandler(["minuslok", "unlok"], minus_lok))
-    app.add_handler(CommandHandler("top", top))
-    app.add_handler(CommandHandler("history", history))
-    app.add_handler(CommandHandler(["mylok", "myloks"], my_loks))
-    app.add_handler(CommandHandler("whitelist", whitelist_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("start", help_cmd))
+    if sub == "add":
+        newly = db.whitelist_add(target_id, target_username)
+        if newly:
+            await message.reply_text(f"✅ {mention} ({target_id}) добавлен в whitelist.")
+        else:
+            await message.reply_text(f"ℹ️ {mention} ({target_id}) уже в whitelist.")
+    elif sub == "remove":
+        removed = db.whitelist_remove(target_id)
+        if removed:
+            await message.reply_text(f"✅ {mention} ({target_id}) удалён из whitelist.")
+        else:
+            await message.reply_text(f"ℹ️ {mention} ({target_id}) не найден в whitelist.")
 
-    logger.info("Бот запущен!")
-    app.run_polling(drop_pending_updates=True)
+
+# ─── Contest ──────────────────────────────────────────────────────────────────
+
+async def finish_contest(context: ContextTypes.DEFAULT_TYPE, contest: dict):
+    """Завершает конкурс и объявляет победителей."""
+    contest_id = contest["id"]
+    chat_id = contest["chat_id"]
+
+    top_users = db.contest_get_top(contest_id, limit=20)
+    prizes = db.contest_get_prizes(contest_id)
+    prizes_map = {p["place"]: p["prize"] for p in prizes}
+
+    results = []
+    for i, user in enumerate(top_users):
+        place = i + 1
+        results.append({
+            "user_id": user["user_id"],
+            "place": place,
+            "lok_count": user["lok_count"],
+            "prize": prizes_map.get(place),
+        })
+
+    db.contest_save_results(contest_id, results)
+    db.contest_set_status(contest_id, "finished")
+
+    if not results:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🏁 Конкурс <b>{contest['title']}</b> завершён!\n\n😔 Никто не набрал локов за период конкурса.",
+            parse_mode="HTML",
+        )
+        return
+
+    lines = [f"🏁 <b>Конкурс «{contest['title']}» завершён!</b>\n\n🏆 <b>Результаты:</b>\n"]
+    for r in results:
+        if not r.get("prize"):
+            break
+        name = db.get_user_by_id(r["user_id"])
+        display = f"@{name['username']}" if name and name.get("username") else f"id{r['user_id']}"
+        count = r["lok_count"]
+        prize = r["prize"]
+        medal = medals(r["place"] - 1)
+        lines.append(f"{medal} {display} — <b>{count}</b> {get_lok_word(count)} — 🎁 {prize}")
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="\n".join(lines),
+        parse_mode="HTML",
+    )
 
 
-if __name__ == "__main__":
-    main()
+async def contest_job(context: ContextTypes.DEFAULT_TYPE):
+    """Джоб — проверяет статусы конкурсов каждую минуту."""
+    now = datetime.utcnow()
+    contests = db.contest_get_all_pending_and_active()
+
+    for contest in contests:
+        start = datetime.fromisoformat(contest["start_at"])
+        end = datetime.fromisoformat(contest["end_at"])
+
+        if contest["status"] == "pending" and now >= start:
+            db.contest_set_status(contest["id"], "active")
+            prizes = db.contest_get_prizes(contest["id"])
+            prize_lines = "\n".join(
+                f"  {medals(p['place'] - 1)} {p['place']} место — {p['prize']}"
+                for p in prizes
+            )
+            await context.bot.send_message(
+                chat_id=contest["chat_id"],
+                text=(
+                    f"🎉 <b>Конкурс «{contest['title']}» начался!</b>\n\n"
+                    f"📅 Конец: <b>{end.strftime('%d.%m.%Y %H:%M')}</b> UTC\n\n"
+                    f"🎁 <b>Призы:</b>\n{prize_lines}\n\n"
+                    f"Кто наберёт больше локов — тот побеждает! 🔒"
+                ),
+                parse_mode="HTML",
+            )
+
+        elif contest["status"] == "active" and now >= end:
+            await finish_contest(context, contest)
+
+
+async def konkurs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    if message.chat.type == "private":
+        await message.reply_text("❌ Конкурсы создаются только в группах!")
+        return
+
+    if not context.args:
+        # Показать текущий конкурс
+        active = db.contest_get_active(message.chat_id)
+        if active:
+            prizes = db.contest_get_prizes(active["id"])
+            prize_lines = "\n".join(
+                f"  {medals(p['place'] - 1)} {p['place']} место — {p['prize']}"
+                for p in prizes
+            )
+            end = datetime.fromisoformat(active["end_at"])
+            await message.reply_text(
+                f"🎯 <b>Активный конкурс: «{active['title']}»</b>\n\n"
+                f"📅 Конец: <b>{end.strftime('%d.%m.%Y %H:%M')}</b> UTC\n\n"
+                f"🎁 <b>Призы:</b>\n{prize_lines}\n\n"
+                f"Используй /konkurs top чтобы увидеть текущий топ.",
+                parse_mode="HTML",
+            )
+        else:
+            pending = db.contest_get_pending(message.chat_id)
+            if pending:
+                start = datetime.fromisoformat(pending["start_at"])
+                await message.reply_text(
+                    f"⏳ Скоро начнётся конкурс «{pending['title']}»\n"
+                    f"📅 Старт: <b>{start.strftime('%d.%m.%Y %H:%M')}</b> UTC",
+                    parse_mode="HTML",
+                )
+            else:
+                await message.reply_text(
+                    "ℹ️ Активных конкурсов нет.\n\n"
+                    "Команды для администраторов:\n"
+                    "/konkurs create — создать конкурс\n"
+                    "/konkurs top — топ текущего конкурса\n"
+                    "/konkurs results — результаты последнего конкурса"
+                )
+        return
+
+    sub = context.args[0].lower()
+
+    # --- TOP ---
+    if sub == "top":
+        active = db.contest_get_active(message.chat_id)
+        if not active:
+            await message.reply_text("❌ Нет активного конкурса.")
+            return
+
+        top_users = db.contest_get_top(active["id"], limit=10)
+        if not top_users:
+            await message.reply_text(f"😔 Пока никто не набрал локов в конкурсе «{active['title']}».")
+            return
+
+        prizes = db.contest_get_prizes(active["id"])
+        prizes_map = {p["place"]: p["prize"] for p in prizes}
+
+        lines = [f"🏆 <b>Топ конкурса «{active['title']}»:</b>\n"]
+        for i, row in enumerate(top_users):
+            place = i + 1
+            medal = medals(i)
+            name = row["first_name"] or row["username"] or f"id{row['user_id']}"
+            username_str = f" (@{row['username']})" if row["username"] else ""
+            count = row["lok_count"]
+            prize_str = f" — 🎁 {prizes_map[place]}" if place in prizes_map else ""
+            lines.append(f"{medal} {name}{username_str} — <b>{count}</b> {get_lok_word(count)}{prize_str}")
+
+        await message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    # --- RESULTS ---
+    if sub == "results":
+        last = db.contest_get_last_finished(message.chat_id)
+        if not last:
+            await message.reply_text("❌
