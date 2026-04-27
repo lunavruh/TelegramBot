@@ -31,6 +31,8 @@ class Database:
                     receiver_id INTEGER NOT NULL,
                     giver_id    INTEGER NOT NULL,
                     chat_id     INTEGER NOT NULL,
+                    reason      TEXT,
+                    type        TEXT NOT NULL DEFAULT 'plus',
                     given_at    TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
@@ -38,6 +40,14 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_loks_given_at ON loks(given_at);
                 CREATE INDEX IF NOT EXISTS idx_loks_chat     ON loks(chat_id);
             """)
+            try:
+                conn.execute("ALTER TABLE loks ADD COLUMN reason TEXT")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE loks ADD COLUMN type TEXT NOT NULL DEFAULT 'plus'")
+            except Exception:
+                pass
 
     def ensure_user(self, user_id: int, username: Optional[str], first_name: Optional[str], last_name: Optional[str]):
         with self._conn() as conn:
@@ -88,24 +98,24 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
-    def add_lok(self, receiver_id: int, giver_id: int, chat_id: int):
+    def add_lok(self, receiver_id: int, giver_id: int, chat_id: int, reason: Optional[str] = None):
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO loks (receiver_id, giver_id, chat_id) VALUES (?, ?, ?)",
-                (receiver_id, giver_id, chat_id),
+                "INSERT INTO loks (receiver_id, giver_id, chat_id, reason, type) VALUES (?, ?, ?, ?, 'plus')",
+                (receiver_id, giver_id, chat_id, reason),
             )
 
-    def remove_lok(self, receiver_id: int):
+    def remove_lok(self, receiver_id: int, reason: Optional[str] = None):
         with self._conn() as conn:
-            conn.execute(
-                """
-                DELETE FROM loks WHERE id = (
-                    SELECT id FROM loks WHERE receiver_id = ?
-                    ORDER BY given_at DESC LIMIT 1
-                )
-                """,
+            row = conn.execute(
+                "SELECT giver_id, chat_id FROM loks WHERE receiver_id = ? AND type = 'plus' ORDER BY given_at DESC LIMIT 1",
                 (receiver_id,),
-            )
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "INSERT INTO loks (receiver_id, giver_id, chat_id, reason, type) VALUES (?, ?, ?, ?, 'minus')",
+                    (receiver_id, row["giver_id"], row["chat_id"], reason),
+                )
 
     def get_total_loks(self, user_id: int) -> int:
         with self._conn() as conn:
@@ -115,17 +125,50 @@ class Database:
 
             if username_row and username_row["username"]:
                 temp_id = -(abs(hash(username_row["username"])) % 10**9)
-                row = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM loks WHERE receiver_id = ? OR receiver_id = ?",
-                    (user_id, temp_id),
-                ).fetchone()
+                ids = (user_id, temp_id)
+                plus = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM loks WHERE receiver_id IN (?, ?) AND type = 'plus'", ids
+                ).fetchone()["cnt"]
+                minus = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM loks WHERE receiver_id IN (?, ?) AND type = 'minus'", ids
+                ).fetchone()["cnt"]
             else:
-                row = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM loks WHERE receiver_id = ?",
-                    (user_id,),
-                ).fetchone()
+                plus = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM loks WHERE receiver_id = ? AND type = 'plus'", (user_id,)
+                ).fetchone()["cnt"]
+                minus = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM loks WHERE receiver_id = ? AND type = 'minus'", (user_id,)
+                ).fetchone()["cnt"]
 
-            return row["cnt"] if row else 0
+            return max(0, plus - minus)
+
+    def get_history(self, user_id: int, limit: int = 50) -> list[dict]:
+        with self._conn() as conn:
+            username_row = conn.execute(
+                "SELECT username FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+
+            if username_row and username_row["username"]:
+                temp_id = -(abs(hash(username_row["username"])) % 10**9)
+                rows = conn.execute(
+                    """
+                    SELECT type, reason, given_at FROM loks
+                    WHERE receiver_id IN (?, ?)
+                    ORDER BY given_at DESC LIMIT ?
+                    """,
+                    (user_id, temp_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT type, reason, given_at FROM loks
+                    WHERE receiver_id = ?
+                    ORDER BY given_at DESC LIMIT ?
+                    """,
+                    (user_id, limit),
+                ).fetchall()
+
+            return [dict(r) for r in rows]
 
     def get_top(self, days: Optional[int] = None, limit: int = 10) -> list[dict]:
         since_clause = ""
@@ -133,7 +176,7 @@ class Database:
 
         if days is not None:
             since = (datetime.utcnow() - timedelta(days=days)).isoformat()
-            since_clause = "WHERE l.given_at >= ?"
+            since_clause = "AND l.given_at >= ?"
             params.append(since)
 
         params.append(limit)
@@ -146,11 +189,12 @@ class Database:
                     u.username,
                     u.first_name,
                     u.last_name,
-                    COUNT(l.id) AS lok_count
+                    SUM(CASE WHEN l.type = 'plus' THEN 1 ELSE -1 END) AS lok_count
                 FROM loks l
                 JOIN users u ON u.user_id = l.receiver_id
-                {since_clause}
+                WHERE 1=1 {since_clause}
                 GROUP BY l.receiver_id
+                HAVING lok_count > 0
                 ORDER BY lok_count DESC
                 LIMIT ?
                 """,
