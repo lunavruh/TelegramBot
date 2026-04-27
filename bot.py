@@ -601,4 +601,242 @@ async def konkurs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sub == "results":
         last = db.contest_get_last_finished(message.chat_id)
         if not last:
-            await message.reply_text("❌
+            await message.reply_text("❌Завершённых конкурсов нет.")
+            return
+
+        results = db.contest_get_results(last["id"])
+        if not results:
+            await message.reply_text(f"😔 В конкурсе «{last['title']}» не было участников.")
+            return
+
+        lines = [f"🏁 <b>Результаты конкурса «{last['title']}»:</b>\n"]
+        for r in results:
+            display = f"@{r['username']}" if r.get("username") else f"id{r['user_id']}"
+            count = r["lok_count"]
+            prize_str = f" — 🎁 {r['prize']}" if r.get("prize") else ""
+            medal = medals(r["place"] - 1)
+            lines.append(f"{medal} {display} — <b>{count}</b> {get_lok_word(count)}{prize_str}")
+
+        await message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    # --- CREATE ---
+    if sub == "create":
+        if not await is_admin(update, context):
+            await message.reply_text("❌ Только администраторы могут создавать конкурсы!")
+            return
+
+        active = db.contest_get_active(message.chat_id)
+        pending = db.contest_get_pending(message.chat_id)
+        if active or pending:
+            await message.reply_text("❌ Уже есть активный или запланированный конкурс. Дождись его завершения.")
+            return
+
+        user_id = message.from_user.id
+        contest_creation[user_id] = {
+            "step": "title",
+            "chat_id": message.chat_id,
+            "data": {}
+        }
+
+        await message.reply_text(
+            "🎯 <b>Создание конкурса</b>\n\n"
+            "Шаг 1/4: Введи название конкурса:",
+            parse_mode="HTML",
+        )
+        return
+
+    await message.reply_text("❌ Неизвестная подкоманда. Используй: create, top, results")
+
+
+async def handle_contest_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает пошаговое создание конкурса через обычные сообщения."""
+    message = update.message
+    if not message or not message.text:
+        return
+
+    user_id = message.from_user.id
+    state = contest_creation.get(user_id)
+    if not state:
+        return
+
+    text = message.text.strip()
+    step = state["step"]
+
+    if step == "title":
+        state["data"]["title"] = text
+        state["step"] = "start_date"
+        await message.reply_text(
+            "📅 Шаг 2/4: Введи дату и время начала конкурса:\n"
+            "Формат: <b>ДД.ММ.ГГГГ ЧЧ:ММ</b> (UTC)\n"
+            "Например: <code>01.06.2025 10:00</code>",
+            parse_mode="HTML",
+        )
+
+    elif step == "start_date":
+        dt = parse_date(text)
+        if not dt:
+            await message.reply_text("❌ Неверный формат. Используй ДД.ММ.ГГГГ ЧЧ:ММ\nНапример: 01.06.2025 10:00")
+            return
+        state["data"]["start_at"] = dt.isoformat()
+        state["step"] = "end_date"
+        await message.reply_text(
+            "📅 Шаг 3/4: Введи дату и время конца конкурса:\n"
+            "Формат: <b>ДД.ММ.ГГГГ ЧЧ:ММ</b> (UTC)\n"
+            "Например: <code>30.06.2025 23:59</code>",
+            parse_mode="HTML",
+        )
+
+    elif step == "end_date":
+        dt = parse_date(text)
+        if not dt:
+            await message.reply_text("❌ Неверный формат. Используй ДД.ММ.ГГГГ ЧЧ:ММ\nНапример: 30.06.2025 23:59")
+            return
+        start = datetime.fromisoformat(state["data"]["start_at"])
+        if dt <= start:
+            await message.reply_text("❌ Дата конца должна быть позже даты начала!")
+            return
+        state["data"]["end_at"] = dt.isoformat()
+        state["step"] = "prizes"
+        state["data"]["prizes"] = {}
+        state["data"]["prize_count"] = None
+        await message.reply_text(
+            "🎁 Шаг 4/4: Сколько призовых мест?\n"
+            "Введи число (например: <code>3</code>)",
+            parse_mode="HTML",
+        )
+
+    elif step == "prizes":
+        if state["data"]["prize_count"] is None:
+            try:
+                n = int(text)
+                if n < 1 or n > 10:
+                    raise ValueError
+            except ValueError:
+                await message.reply_text("❌ Введи число от 1 до 10.")
+                return
+            state["data"]["prize_count"] = n
+            state["data"]["prizes"] = {}
+            state["step"] = "prize_entry"
+            state["data"]["current_prize_place"] = 1
+            await message.reply_text(
+                f"🥇 Введи приз для <b>1 места</b>:\n"
+                f"Например: <code>30$</code>",
+                parse_mode="HTML",
+            )
+
+    elif step == "prize_entry":
+        place = state["data"]["current_prize_place"]
+        state["data"]["prizes"][place] = text
+        next_place = place + 1
+        total = state["data"]["prize_count"]
+
+        if next_place <= total:
+            state["data"]["current_prize_place"] = next_place
+            medal = medals(next_place - 1)
+            await message.reply_text(
+                f"{medal} Введи приз для <b>{next_place} места</b>:",
+                parse_mode="HTML",
+            )
+        else:
+            # Всё введено — создаём конкурс
+            d = state["data"]
+            contest_id = db.contest_create(
+                chat_id=state["chat_id"],
+                title=d["title"],
+                start_at=d["start_at"],
+                end_at=d["end_at"],
+                created_by=user_id,
+            )
+            for p, prize in d["prizes"].items():
+                db.contest_add_prize(contest_id, p, prize)
+
+            del contest_creation[user_id]
+
+            start = datetime.fromisoformat(d["start_at"])
+            end = datetime.fromisoformat(d["end_at"])
+            prize_lines = "\n".join(
+                f"  {medals(p - 1)} {p} место — {prize}"
+                for p, prize in d["prizes"].items()
+            )
+
+            await message.reply_text(
+                f"✅ <b>Конкурс создан!</b>\n\n"
+                f"📌 Название: <b>{d['title']}</b>\n"
+                f"📅 Начало: <b>{start.strftime('%d.%m.%Y %H:%M')}</b> UTC\n"
+                f"📅 Конец: <b>{end.strftime('%d.%m.%Y %H:%M')}</b> UTC\n\n"
+                f"🎁 Призы:\n{prize_lines}",
+                parse_mode="HTML",
+            )
+
+
+# ─── Help ─────────────────────────────────────────────────────────────────────
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_private_access(update):
+        return
+
+    text = (
+        "🤖 <b>Бот-менеджер локов</b>\n\n"
+        "📌 <b>Основные команды:</b>\n"
+        "/pluslok @username [причина] — дать лок (только админы)\n"
+        "/minuslok @username [причина] — забрать лок (только админы)\n"
+        "/history [@username] — история локов\n"
+        "/top [дней] — топ по локам\n"
+        "/mylok — сколько локов у тебя\n\n"
+        "🎯 <b>Конкурсы:</b>\n"
+        "/konkurs — инфо об активном конкурсе\n"
+        "/konkurs create — создать конкурс (только админы)\n"
+        "/konkurs top — топ текущего конкурса\n"
+        "/konkurs results — результаты последнего конкурса\n\n"
+        "🔒 <b>Доступ в ЛС:</b> только whitelist.\n"
+        "/whitelist add/remove/list — управление (только владелец)\n\n"
+        "💎 <i>Лок — это знак уважения в чате!</i>"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    token = os.environ.get("BOT_TOKEN")
+    if not token:
+        raise ValueError("Укажи BOT_TOKEN в переменных окружения")
+
+    if OWNER_ID is None:
+        logger.warning("OWNER_ID не задан! /whitelist будет недоступен.")
+    else:
+        logger.info(f"Владелец бота: {OWNER_ID}")
+
+    app = Application.builder().token(token).build()
+
+    # Loks
+    app.add_handler(CommandHandler(["pluslok", "lok"], plus_lok))
+    app.add_handler(CommandHandler(["minuslok", "unlok"], minus_lok))
+    app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("history", history))
+    app.add_handler(CommandHandler(["mylok", "myloks"], my_loks))
+
+    # Whitelist
+    app.add_handler(CommandHandler("whitelist", whitelist_cmd))
+
+    # Contest
+    app.add_handler(CommandHandler("konkurs", konkurs_cmd))
+
+    # Help
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("start", help_cmd))
+
+    # Обработчик пошагового создания конкурса (текстовые сообщения)
+    from telegram.ext import MessageHandler, filters
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_contest_creation))
+
+    # Джоб — проверка конкурсов каждую минуту
+    app.job_queue.run_repeating(contest_job, interval=60, first=10)
+
+    logger.info("Бот запущен!")
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
