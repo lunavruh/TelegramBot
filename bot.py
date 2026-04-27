@@ -6,8 +6,6 @@ from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 from database import Database
 
@@ -21,7 +19,6 @@ db = Database("loks.db")
 
 
 def get_lok_word(count: int) -> str:
-    """Возвращает правильную форму слова 'лок'"""
     if 11 <= count % 100 <= 14:
         return "локов"
     last = count % 10
@@ -34,20 +31,16 @@ def get_lok_word(count: int) -> str:
 
 
 async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /плюслок @username"""
     message = update.message
     if not message:
         return
 
-    # Проверяем что команда в группе
     if message.chat.type == "private":
         await message.reply_text("❌ Эта команда работает только в группах!")
         return
 
-    # Получаем упомянутого пользователя
     target_user = None
 
-    # Из mention entities
     if message.entities:
         for entity in message.entities:
             if entity.type == "mention":
@@ -66,19 +59,13 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
 
     if not target_user:
-        await message.reply_text(
-            "❌ Укажи пользователя: /плюслок @username"
-        )
+        await message.reply_text("❌ Укажи пользователя: /pluslok @username")
         return
 
-    # Нельзя давать лок самому себе
     if target_user["user_id"] == message.from_user.id:
         await message.reply_text("❌ Нельзя давать лок самому себе!")
         return
 
-    # Добавляем лок
-    giver_id = message.from_user.id
-    giver_name = message.from_user.first_name or message.from_user.username or "Аноним"
     db.ensure_user(
         message.from_user.id,
         message.from_user.username,
@@ -88,7 +75,7 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db.add_lok(
         receiver_id=target_user["user_id"],
-        giver_id=giver_id,
+        giver_id=message.from_user.id,
         chat_id=message.chat_id,
     )
 
@@ -102,7 +89,6 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /top [дней]"""
     message = update.message
     if not message:
         return
@@ -151,7 +137,6 @@ def _day_word(days: int) -> str:
 
 
 async def my_loks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает количество локов у самого пользователя"""
     message = update.message
     if not message:
         return
@@ -170,11 +155,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🤖 <b>Бот-менеджер локов</b>\n\n"
         "📌 <b>Команды:</b>\n"
-        "/плюслок @username — дать 1 лок пользователю\n"
+        "/pluslok @username — дать 1 лок пользователю\n"
         "/top — топ по локам за всё время\n"
         "/top 30 — топ за 30 дней\n"
         "/top 1 — топ за сегодня\n"
-        "/мойлок — сколько локов у тебя\n"
+        "/mylok — сколько локов у тебя\n"
         "/help — это сообщение\n\n"
         "💎 <i>Лок — это знак уважения в чате!</i>"
     )
@@ -188,9 +173,9 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    app.add_handler(CommandHandler(["плюслок", "pluslok", "lok"], plus_lok))
+    app.add_handler(CommandHandler(["pluslok", "lok"], plus_lok))
     app.add_handler(CommandHandler("top", top))
-    app.add_handler(CommandHandler(["мойлок", "mylok", "myloks"], my_loks))
+    app.add_handler(CommandHandler(["mylok", "myloks"], my_loks))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", help_cmd))
 
