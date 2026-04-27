@@ -104,6 +104,13 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
+    def get_user_by_id(self, user_id: int) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
     def add_lok(self, receiver_id: int, giver_id: int, chat_id: int, reason: Optional[str] = None):
         with self._conn() as conn:
             conn.execute(
