@@ -28,8 +28,8 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS loks (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    receiver_id INTEGER NOT NULL REFERENCES users(user_id),
-                    giver_id    INTEGER NOT NULL REFERENCES users(user_id),
+                    receiver_id INTEGER NOT NULL,
+                    giver_id    INTEGER NOT NULL,
                     chat_id     INTEGER NOT NULL,
                     given_at    TEXT NOT NULL DEFAULT (datetime('now'))
                 );
@@ -39,17 +39,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_loks_chat       ON loks(chat_id);
             """)
 
-    # ──────────────────────────────────────────────
-    # User helpers
-    # ──────────────────────────────────────────────
-
-    def ensure_user(
-        self,
-        user_id: int,
-        username: Optional[str],
-        first_name: Optional[str],
-        last_name: Optional[str],
-    ):
+    def ensure_user(self, user_id: int, username: Optional[str], first_name: Optional[str], last_name: Optional[str]):
         with self._conn() as conn:
             conn.execute(
                 """
@@ -62,9 +52,23 @@ class Database:
                 """,
                 (user_id, username, first_name, last_name),
             )
+            if username:
+                conn.execute(
+                    """
+                    UPDATE loks SET receiver_id = ?
+                    WHERE receiver_id IN (
+                        SELECT user_id FROM users
+                        WHERE username = ? COLLATE NOCASE AND user_id != ?
+                    )
+                    """,
+                    (user_id, username, user_id),
+                )
+                conn.execute(
+                    "DELETE FROM users WHERE username = ? COLLATE NOCASE AND user_id != ?",
+                    (username, user_id),
+                )
 
     def get_or_create_user_by_username(self, username: str) -> Optional[dict]:
-        """Ищет пользователя по username. Если не найден — создаёт заглушку."""
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
@@ -73,21 +77,16 @@ class Database:
             if row:
                 return dict(row)
 
-            # Пользователь ещё не встречался боту — создаём запись
+            temp_id = -(abs(hash(username)) % 10**9)
             conn.execute(
                 "INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
-                # Временный отрицательный ID как плейсхолдер (перезапишется при первом сообщении)
-                (-(abs(hash(username)) % 10**9), username, username),
+                (temp_id, username, username),
             )
             row = conn.execute(
                 "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
                 (username,),
             ).fetchone()
             return dict(row) if row else None
-
-    # ──────────────────────────────────────────────
-    # Lok helpers
-    # ──────────────────────────────────────────────
 
     def add_lok(self, receiver_id: int, giver_id: int, chat_id: int):
         with self._conn() as conn:
@@ -98,10 +97,22 @@ class Database:
 
     def get_total_loks(self, user_id: int) -> int:
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM loks WHERE receiver_id = ?",
-                (user_id,),
+            username_row = conn.execute(
+                "SELECT username FROM users WHERE user_id = ?", (user_id,)
             ).fetchone()
+
+            if username_row and username_row["username"]:
+                temp_id = -(abs(hash(username_row["username"])) % 10**9)
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM loks WHERE receiver_id = ? OR receiver_id = ?",
+                    (user_id, temp_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM loks WHERE receiver_id = ?",
+                    (user_id,),
+                ).fetchone()
+
             return row["cnt"] if row else 0
 
     def get_top(self, days: Optional[int] = None, limit: int = 10) -> list[dict]:
