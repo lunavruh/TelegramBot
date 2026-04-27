@@ -79,9 +79,7 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ Нельзя давать лок самому себе!")
         return
 
-    # Получаем причину — всё что после @username
     full_text = message.text or ""
-    # Убираем команду и mention, остаток — причина
     parts = full_text.split(maxsplit=2)
     reason = parts[2].strip() if len(parts) >= 3 else None
 
@@ -100,19 +98,21 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     total = db.get_total_loks(target_user["user_id"])
 
-    # Удаляем исходное сообщение
     try:
         await message.delete()
     except Exception:
         pass
 
-    # Формируем сообщение
     if reason:
         text = f"{mention_text} 🔒 {reason}\n💎 Локов: {total}"
     else:
         text = f"{mention_text} получает лок!\n💎 Локов: {total}"
 
-    await context.bot.send_message(chat_id=message.chat_id, text=text)
+    await context.bot.send_message(
+        chat_id=message.chat_id,
+        message_thread_id=message.message_thread_id,
+        text=text
+    )
 
 
 async def minus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,7 +163,6 @@ async def minus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ У пользователя нет локов!")
         return
 
-    # Получаем причину
     full_text = message.text or ""
     parts = full_text.split(maxsplit=2)
     reason = parts[2].strip() if len(parts) >= 3 else None
@@ -178,19 +177,21 @@ async def minus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.remove_lok(receiver_id=target_user["user_id"])
     total = db.get_total_loks(target_user["user_id"])
 
-    # Удаляем исходное сообщение
     try:
         await message.delete()
     except Exception:
         pass
 
-    # Формируем сообщение
     if reason:
         text = f"{mention_text} 🔓 -{reason}\n💎 Локов: {total}"
     else:
         text = f"{mention_text} теряет лок!\n💎 Локов: {total}"
 
-    await context.bot.send_message(chat_id=message.chat_id, text=text)
+    await context.bot.send_message(
+        chat_id=message.chat_id,
+        message_thread_id=message.message_thread_id,
+        text=text
+    )
 
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
