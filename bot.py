@@ -94,6 +94,7 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         receiver_id=target_user["user_id"],
         giver_id=message.from_user.id,
         chat_id=message.chat_id,
+        reason=reason,
     )
 
     total = db.get_total_loks(target_user["user_id"])
@@ -104,7 +105,7 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     if reason:
-        text = f"{mention_text} lock {reason} 🔒"
+        text = f"{mention_text} 🔒 {reason}\n💎 Локов: {total}"
     else:
         text = f"{mention_text} получает лок!\n💎 Локов: {total}"
 
@@ -174,7 +175,7 @@ async def minus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message.from_user.last_name,
     )
 
-    db.remove_lok(receiver_id=target_user["user_id"])
+    db.remove_lok(receiver_id=target_user["user_id"], reason=reason)
     total = db.get_total_loks(target_user["user_id"])
 
     try:
@@ -183,7 +184,7 @@ async def minus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     if reason:
-        text = f"{mention_text} - {reason}🔓\n💎 Локов: {total}"
+        text = f"{mention_text} 🔓 -{reason}\n💎 Локов: {total}"
     else:
         text = f"{mention_text} теряет лок!\n💎 Локов: {total}"
 
@@ -192,6 +193,65 @@ async def minus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_thread_id=message.message_thread_id,
         text=text
     )
+
+
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    target_user = None
+    mention_text = None
+
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "mention":
+                username = message.text[entity.offset + 1: entity.offset + entity.length]
+                mention_text = f"@{username}"
+                target_user = db.get_or_create_user_by_username(username)
+                break
+            elif entity.type == "text_mention" and entity.user:
+                u = entity.user
+                mention_text = u.first_name or f"@{u.username}"
+                target_user = {
+                    "user_id": u.id,
+                    "username": u.username,
+                    "first_name": u.first_name,
+                    "last_name": u.last_name,
+                }
+                break
+
+    if not target_user:
+        user = message.from_user
+        db.ensure_user(user.id, user.username, user.first_name, user.last_name)
+        target_user = {
+            "user_id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+        }
+        mention_text = user.first_name or f"@{user.username}"
+
+    records = db.get_history(target_user["user_id"])
+
+    if not records:
+        await message.reply_text(f"📋 У {mention_text} пока нет истории локов.")
+        return
+
+    lines = [f"📋 <b>История локов — {mention_text}:</b>\n"]
+    for r in records:
+        date = r["given_at"][:10]
+        if r["type"] == "plus":
+            reason_str = f" — {r['reason']}" if r.get("reason") else ""
+            lines.append(f"🔒 +1{reason_str} <i>({date})</i>")
+        else:
+            reason_str = f" — {r['reason']}" if r.get("reason") else ""
+            lines.append(f"🔓 -1{reason_str} <i>({date})</i>")
+
+    total = db.get_total_loks(target_user["user_id"])
+    lines.append(f"\n💎 Итого: <b>{total}</b> {get_lok_word(total)}")
+
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -263,6 +323,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 <b>Команды:</b>\n"
         "/pluslok @username [предмет] — дать лок (только админы)\n"
         "/minuslok @username [причина] — забрать лок (только админы)\n"
+        "/history @username — история локов пользователя\n"
         "/top — топ по локам за всё время\n"
         "/top 30 — топ за 30 дней\n"
         "/mylok — сколько локов у тебя\n"
@@ -282,6 +343,7 @@ def main():
     app.add_handler(CommandHandler(["pluslok", "lok"], plus_lok))
     app.add_handler(CommandHandler(["minuslok", "unlok"], minus_lok))
     app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler(["mylok", "myloks"], my_loks))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", help_cmd))
