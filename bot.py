@@ -104,7 +104,7 @@ async def plus_lok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     if reason:
-        text = f"{mention_text} {reason} 🔒"
+        text = f"{mention_text} lock {reason} 🔒"
     else:
         text = f"{mention_text} получает лок!\n💎 Локов: {total}"
 
